@@ -1,0 +1,143 @@
+// AI E-Nose v1.1 - ESP32 + ADS1115 + 5x MQ + DHT11 + 16x2 LCD + buzzer
+// Logs all MQ outputs in VOLTS (divider-corrected)
+// Libraries: Adafruit ADS1X15, DHT sensor library, Adafruit Unified Sensor
+// ESP32 Arduino core 3.x
+
+#include <Wire.h>
+#include <Adafruit_ADS1X15.h>
+#include <DHT.h>
+#include <LiquidCrystal.h>
+
+Adafruit_ADS1115 ads;
+
+#define DHTPIN 4
+#define DHTTYPE DHT11
+DHT dht(DHTPIN, DHTTYPE);
+
+// LCD: RS, E, D4, D5, D6, D7
+LiquidCrystal lcd(13, 14, 16, 17, 18, 19);
+
+#define MQ7_PIN    34
+#define BUZZER_PIN 25
+#define BUTTON_PIN 27
+
+// Equal-resistor divider halves the voltage
+const float DIVIDER_RATIO = 2.0;
+
+const unsigned long READ_INTERVAL = 1000;
+const unsigned long PAGE_INTERVAL = 3000;
+
+unsigned long lastRead = 0;
+unsigned long lastPage = 0;
+uint8_t page = 0;
+
+float mq2, mq3, mq5, mq135, mq7;
+float temperature = NAN, humidity = NAN;
+
+// Pads to 16 chars so lcd.clear() is not needed (no flicker)
+void lcdLine(uint8_t row, const char *text) {
+  char buf[17];
+  snprintf(buf, sizeof(buf), "%-16s", text);
+  lcd.setCursor(0, row);
+  lcd.print(buf);
+}
+
+float readAds(uint8_t ch) {
+  float v = ads.computeVolts(ads.readADC_SingleEnded(ch)) * DIVIDER_RATIO;
+  return v < 0 ? 0 : v;
+}
+
+float readEsp32Volts(uint8_t pin) {
+  uint32_t sum = 0;
+  for (int i = 0; i < 16; i++) sum += analogReadMilliVolts(pin);
+  return (sum / 16.0) / 1000.0 * DIVIDER_RATIO;
+}
+
+void showLcd() {
+  char l0[20], l1[20];
+  if (page == 0) {
+    snprintf(l0, sizeof(l0), "M2:%.2f M3:%.2f", mq2, mq3);
+    snprintf(l1, sizeof(l1), "M5:%.2f M7:%.2f", mq5, mq7);
+  } else {
+    snprintf(l0, sizeof(l0), "M135:%.2f V", mq135);
+    if (isnan(temperature) || isnan(humidity))
+      snprintf(l1, sizeof(l1), "T:-- H:--");
+    else
+      snprintf(l1, sizeof(l1), "T:%.0fC H:%.0f%%", temperature, humidity);
+  }
+  lcdLine(0, l0);
+  lcdLine(1, l1);
+}
+
+void setup() {
+  Serial.begin(115200);
+
+  pinMode(BUZZER_PIN, OUTPUT);
+  pinMode(BUTTON_PIN, INPUT_PULLUP);
+  digitalWrite(BUZZER_PIN, LOW);
+
+  analogSetPinAttenuation(MQ7_PIN, ADC_11db);
+
+  Wire.begin(21, 22);
+  lcd.begin(16, 2);
+  lcdLine(0, "AI E-NOSE");
+  lcdLine(1, "Initializing...");
+
+  dht.begin();
+
+  if (!ads.begin(0x48)) {
+    lcdLine(0, "ADS1115 ERROR");
+    lcdLine(1, "Check I2C wiring");
+    while (1) delay(100);
+  }
+  ads.setGain(GAIN_ONE);  // +/-4.096V, 0.125 mV per count
+
+  delay(2000);
+  Serial.println("Time_ms,MQ2_V,MQ3_V,MQ5_V,MQ135_V,MQ7_V,Temp_C,Hum_pct");
+  lcdLine(0, "E-Nose Ready");
+  lcdLine(1, "");
+  delay(1000);
+}
+
+void loop() {
+  unsigned long now = millis();
+
+  if (now - lastRead >= READ_INTERVAL) {
+    lastRead = now;
+
+    mq2   = readAds(0);
+    mq3   = readAds(1);
+    mq5   = readAds(2);
+    mq135 = readAds(3);
+    mq7   = readEsp32Volts(MQ7_PIN);
+
+    float t = dht.readTemperature();
+    float h = dht.readHumidity();
+    if (!isnan(t)) temperature = t;
+    if (!isnan(h)) humidity = h;
+
+    Serial.print(now);      Serial.print(",");
+    Serial.print(mq2, 4);   Serial.print(",");
+    Serial.print(mq3, 4);   Serial.print(",");
+    Serial.print(mq5, 4);   Serial.print(",");
+    Serial.print(mq135, 4); Serial.print(",");
+    Serial.print(mq7, 4);   Serial.print(",");
+    if (isnan(temperature) || isnan(humidity)) {
+      Serial.println("NA,NA");
+    } else {
+      Serial.print(temperature, 1); Serial.print(",");
+      Serial.println(humidity, 1);
+    }
+
+    showLcd();
+  }
+
+  if (now - lastPage >= PAGE_INTERVAL) {
+    lastPage = now;
+    page = (page + 1) % 2;
+    showLcd();
+  }
+
+  // Button test: hold to sound buzzer
+  digitalWrite(BUZZER_PIN, digitalRead(BUTTON_PIN) == LOW ? HIGH : LOW);
+}
